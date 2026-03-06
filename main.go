@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -130,65 +131,73 @@ func (app *App) createTables() error {
 }
 
 func (app *App) loadCSVData() error {
-	// Load staff mappings CSV
-	if err := app.loadStaffMappings(); err != nil {
-		log.Printf("Error loading staff mappings: %v", err)
-		return err
-	}
-
-	log.Println("CSV data loaded successfully")
-	return nil
+	return app.loadStaffMappingsFromPath("/app/data/staff_mappings.csv")
 }
 
-func (app *App) loadStaffMappings() error {
-	csvFile := "/app/data/staff_mappings.csv"
-	if _, err := os.Stat(csvFile); os.IsNotExist(err) {
-		log.Printf("CSV file not found: %s", csvFile)
+func (app *App) loadStaffMappingsFromPath(csvFilePath string) error {
+	if _, err := os.Stat(csvFilePath); os.IsNotExist(err) {
+		log.Printf("CSV file not found: %s", csvFilePath)
 		return nil // Not an error, just no data to load
 	}
 
-	file, err := os.Open(csvFile)
+	file, err := os.Open(csvFilePath)
 	if err != nil {
 		return fmt.Errorf("error opening CSV file: %v", err)
 	}
 	defer file.Close()
 
-	reader := csv.NewReader(file)
-	records, err := reader.ReadAll()
+	mappings, err := parseStaffMappingsCSV(file)
 	if err != nil {
-		return fmt.Errorf("error reading CSV file: %v", err)
+		return err
 	}
 
-	if len(records) == 0 {
-		return fmt.Errorf("CSV file is empty")
-	}
-
-	// Skip header row
-	for i, record := range records[1:] {
-		if len(record) != 3 {
-			log.Printf("Skipping invalid record at line %d: %v", i+2, record)
-			continue
-		}
-
-		createdAt, err := strconv.ParseInt(record[2], 10, 64)
-		if err != nil {
-			log.Printf("Invalid timestamp at line %d: %v", i+2, err)
-			continue
-		}
-
-		mapping := StaffMapping{
-			StaffPassID: record[0],
-			TeamName:    record[1],
-			CreatedAt:   createdAt,
-		}
-
+	for i, mapping := range mappings {
 		if err := app.insertStaffMapping(mapping); err != nil {
 			log.Printf("Error inserting staff mapping at line %d: %v", i+2, err)
 		}
 	}
 
-	log.Printf("Loaded staff mappings from %s", csvFile)
+	log.Printf("Loaded staff mappings from %s", csvFilePath)
+	log.Println("CSV data loaded successfully")
 	return nil
+}
+
+// parseStaffMappingsCSV parses CSV data from any io.Reader into a slice of StaffMapping.
+// It skips the header row and logs (but does not abort on) malformed records.
+func parseStaffMappingsCSV(r io.Reader) ([]StaffMapping, error) {
+	reader := csv.NewReader(r)
+	reader.FieldsPerRecord = -1 // Allow variable field counts; invalid rows are filtered below
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("error reading CSV file: %v", err)
+	}
+
+	if len(records) == 0 {
+		return nil, fmt.Errorf("CSV file is empty")
+	}
+
+	var mappings []StaffMapping
+	// Skip header row
+	for i, record := range records[1:] {
+		if len(record) != 3 {
+			log.Printf("Skipping invalid record at line %d: expected 3 fields, got %d", i+2, len(record))
+			continue
+		}
+
+		createdAt, err := strconv.ParseInt(record[2], 10, 64)
+		if err != nil {
+			log.Printf("Skipping invalid timestamp at line %d: %v", i+2, err)
+			continue
+		}
+
+		mappings = append(mappings, StaffMapping{
+			StaffPassID: record[0],
+			TeamName:    record[1],
+			CreatedAt:   createdAt,
+		})
+	}
+
+	return mappings, nil
 }
 
 func (app *App) insertStaffMapping(mapping StaffMapping) error {
