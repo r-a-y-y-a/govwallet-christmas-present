@@ -1,3 +1,9 @@
+Current to-do list:
+1. Basic unit tests for quick start-up health
+2. Adjust PostgreSQL tables to fit the context of the problem more (i.e. redemptions should all be false and then updated as it goes)
+3. Simulate redemptions for testing
+4. Trim down CRUD operations (delete operation likely not necessary)
+
 # GovTech Christmas Redemption System
 
 A Go-based redemption system with PostgreSQL persistence for managing Christmas gift redemptions.
