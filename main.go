@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/csv"
 	"fmt"
@@ -11,8 +12,8 @@ import (
 	"strconv"
 
 	"github.com/hanju/govtech-christmas/api"
-
 	_ "github.com/lib/pq"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 type StaffMapping struct {
@@ -30,6 +31,12 @@ func main() {
 		log.Fatal("Failed to connect to database:", err)
 	}
 	defer db.Close()
+
+	redisClient, err := initRedis()
+	if err != nil {
+		log.Fatal("Failed to connect to Redis:", err)
+	}
+	defer redisClient.Close()
 
 	app := &api.App{DB: db}
 
@@ -49,6 +56,32 @@ func main() {
 	if err := http.ListenAndServe(":"+port, router); err != nil {
 		log.Fatal("Server failed to start:", err)
 	}
+}
+
+func initRedis() (*goredis.Client, error) {
+	host := getEnvOrDefault("REDIS_HOST", "localhost")
+	port := getEnvOrDefault("REDIS_PORT", "6379")
+	password := getEnvOrDefault("REDIS_PASSWORD", "")
+	dbStr := getEnvOrDefault("REDIS_DB", "0")
+
+	dbNum, err := strconv.Atoi(dbStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid REDIS_DB value: %v", err)
+	}
+
+	client := goredis.NewClient(&goredis.Options{
+		Addr:     fmt.Sprintf("%s:%s", host, port),
+		Password: password,
+		DB:       dbNum,
+	})
+
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("failed to ping Redis: %v", err)
+	}
+
+	log.Println("Successfully connected to Redis")
+	return client, nil
 }
 
 func initDB() (*sql.DB, error) {
