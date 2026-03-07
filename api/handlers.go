@@ -13,9 +13,27 @@ func SetupRoutes(app *App) *gin.Engine {
 
 	// Health check endpoint
 	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "govtech-christmas-redemption",
+		dbOK := app.DB.Ping() == nil
+
+		cacheOK := true
+		if app.Cache != nil {
+			cacheOK = app.Cache.Ping(c.Request.Context()) == nil
+		}
+
+		status := "healthy"
+		httpCode := http.StatusOK
+		if !dbOK {
+			status = "unhealthy"
+			httpCode = http.StatusServiceUnavailable
+		} else if !cacheOK {
+			status = "degraded"
+		}
+
+		c.JSON(httpCode, gin.H{
+			"status":   status,
+			"service":  "govtech-christmas-redemption",
+			"database": dbOK,
+			"cache":    cacheOK,
 		})
 	})
 
@@ -147,6 +165,13 @@ func (app *App) deleteRedemption(c *gin.Context) {
 	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Redemption not found"})
 		return
+	}
+
+	// Invalidate cache so the team can redeem again
+	if app.Cache != nil {
+		if invErr := app.Cache.InvalidateRedemption(c.Request.Context(), teamName); invErr != nil {
+			log.Printf("cache: InvalidateRedemption error for %s: %v", teamName, invErr)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Redemption deleted successfully"})
