@@ -8,6 +8,30 @@ Current to-do list:
 
 A Go-based redemption system with PostgreSQL persistence for managing Christmas gift redemptions.
 
+## Features
+
+- **CLI Interface**: Interactive command-line interface for staff to redeem presents by entering their Staff Pass ID
+- **REST API Server**: Full HTTP API for programmatic access (optional)
+- **Database Persistence**: PostgreSQL backend with automatic table creation
+- **CSV Data Loading**: Automatically loads staff mappings from CSV files
+
+## Architecture
+
+```
+govtech-christmas/
+├── main.go              # CLI application entry point
+├── cmd/
+│   └── server/
+│       └── main.go      # HTTP API server entry point
+├── api/
+│   ├── handlers.go      # HTTP request handlers
+│   ├── service.go       # Business logic layer
+│   └── types.go         # Data models
+├── data/
+│   └── staff_mappings.csv
+└── init.sql             # Database initialization script
+```
+
 ## User Stories
 
 ### Counter Staff Functions
@@ -40,40 +64,91 @@ A Go-based redemption system with PostgreSQL persistence for managing Christmas 
 ## Quick Start
 
 ### Prerequisites
-- Docker & Docker Compose
-- Go 1.21+ (for local development)
+- Docker & Docker Compose (for database)
+- Go 1.21+ 
 
-### Running with Docker
+### Option 1: CLI Interface (Recommended for Counter Staff)
 
-1. **Start the services:**
-```bash
-docker-compose up -d
-```
+This interactive CLI allows staff to redeem presents by entering their Staff Pass ID.
 
-2. **Verify the application is running:**
-```bash
-curl http://localhost:8080/health
-```
-
-3. **Access the API:**
-- Health Check: `GET http://localhost:8080/health`
-- List Redemptions: `GET http://localhost:8080/api/v1/redemptions`
-- Get Redemption: `GET http://localhost:8080/api/v1/redemptions/{id}`
-- Create Redemption: `POST http://localhost:8080/api/v1/redemptions`
-- Update Redemption: `PUT http://localhost:8080/api/v1/redemptions/{id}`
-- Delete Redemption: `DELETE http://localhost:8080/api/v1/redemptions/{id}`
-
-### Local Development
-
-1. **Start only the database:**
+1. **Start the database:**
 ```bash
 docker-compose up postgres -d
 ```
 
-2. **Run the Go application:**
+2. **Run the CLI application:**
 ```bash
 go run main.go
 ```
+
+3. **Use the interface:**
+```
+============================================================
+    🎄 GovTech Christmas Present Redemption System 🎁
+============================================================
+
+Enter your Staff Pass ID (or 'quit' to exit): STAFF001
+
+✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨
+✅ SUCCESS! Successfully redeemed present for team 'Team Alpha'!
+   Team: Team Alpha
+   Redeemed at: 2026-03-07 14:30:45
+✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨
+
+Enter your Staff Pass ID (or 'quit' to exit): STAFF001
+
+❌ FAILED: Team 'Team Alpha' has already redeemed their present
+
+Enter your Staff Pass ID (or 'quit' to exit): quit
+
+👋 Thank you for using the redemption system. Goodbye!
+```
+
+### Option 2: HTTP API Server
+
+For programmatic access or integration with other systems.
+
+1. **Start the database:**
+```bash
+docker-compose up postgres -d
+```
+
+2. **Run the API server:**
+```bash
+go run cmd/server/main.go
+```
+
+3. **Access the API endpoints:**
+
+**Health Check:**
+```bash
+curl http://localhost:8080/health
+```
+
+**Check Eligibility:**
+```bash
+curl http://localhost:8080/api/v1/eligibility/STAFF001
+```
+
+**Redeem Present:**
+```bash
+curl -X POST http://localhost:8080/api/v1/redeem/STAFF001
+```
+
+**List All Redemptions:**
+```bash
+curl http://localhost:8080/api/v1/redemptions
+```
+
+### Option 3: Running with Docker Compose
+
+To run everything in containers:
+
+```bash
+docker-compose up -d
+```
+
+This will start both the database and the API server. Access the API at `http://localhost:8080`.
 
 ### Database Access
 
@@ -121,11 +196,11 @@ POST /api/v1/redeem/{staff_pass_id}           # Redeem gift for staff member
 
 #### Redemptions Management
 ```bash
-GET    /api/v1/redemptions       # List all redemptions
-GET    /api/v1/redemptions/{id}  # Get specific redemption
-POST   /api/v1/redemptions       # Create new redemption
-PUT    /api/v1/redemptions/{id}  # Update redemption
-DELETE /api/v1/redemptions/{id}  # Delete redemption
+GET    /api/v1/redemptions              # List all redemptions
+GET    /api/v1/redemptions/{team_name}  # Get specific redemption by team name
+POST   /api/v1/redemptions              # Create new redemption
+PUT    /api/v1/redemptions/{team_name}  # Update redemption
+DELETE /api/v1/redemptions/{team_name}  # Delete redemption
 ```
 
 ### Example API Responses
@@ -136,6 +211,41 @@ DELETE /api/v1/redemptions/{id}  # Delete redemption
   "staff_pass_id": "STAFF001",
   "team_name": "Team Alpha",
   "valid": true,
+  "mapping_created_at": 1703462400000
+}
+```
+
+**Eligibility Check (Eligible):**
+```json
+{
+  "staff_pass_id": "STAFF001",
+  "team_name": "Team Alpha",
+  "eligible": true,
+  "reason": "Team is eligible for redemption"
+}
+```
+
+**Eligibility Check (Already Redeemed):**
+```json
+{
+  "staff_pass_id": "STAFF001",
+  "team_name": "Team Alpha",
+  "eligible": false,
+  "reason": "Team has already redeemed"
+}
+```
+
+**Successful Redemption:**
+```json
+{
+  "message": "Redemption successful",
+  "redemption": {
+    "team_name": "Team Alpha",
+    "redeemed": true,
+    "redeemed_at": "2026-03-07T14:30:45Z"
+  }
+}
+```
   "mapping_created_at": 1703462400000
 }
 ```
