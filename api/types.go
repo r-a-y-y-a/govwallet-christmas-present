@@ -1,6 +1,17 @@
 package api
 
-import "time"
+import (
+	"database/sql"
+	"time"
+
+	"github.com/hanju/govtech-christmas/api/cache"
+)
+
+// App holds shared dependencies for all handlers and services.
+type App struct {
+	DB    *sql.DB
+	Cache cache.CacheStore
+}
 
 type StaffMapping struct {
 	ID          int    `json:"id" db:"id"`

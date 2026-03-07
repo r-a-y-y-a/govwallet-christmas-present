@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/hanju/govtech-christmas/api"
+	"github.com/hanju/govtech-christmas/api/cache"
 	_ "github.com/lib/pq"
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -38,7 +39,8 @@ func main() {
 	}
 	defer redisClient.Close()
 
-	app := &api.App{DB: db}
+	redisCache := cache.NewRedisCache(redisClient)
+	app := &api.App{DB: db, Cache: redisCache}
 
 	if err := createTables(db); err != nil {
 		log.Fatal("Failed to create tables:", err)
@@ -46,6 +48,11 @@ func main() {
 
 	if err := loadCSVData(db); err != nil {
 		log.Printf("Warning: Failed to load CSV data: %v", err)
+	}
+
+	// Pre-warm Redis cache with staff mappings from DB
+	if err := prewarmCache(db, redisCache); err != nil {
+		log.Printf("Warning: Failed to pre-warm cache: %v", err)
 	}
 
 	router := api.SetupRoutes(app)
@@ -226,4 +233,35 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// prewarmCache loads all staff mappings from PostgreSQL into Redis
+// so the first requests don't suffer cold-start cache misses.
+func prewarmCache(db *sql.DB, c cache.CacheStore) error {
+	ctx := context.Background()
+	rows, err := db.Query(`
+		SELECT DISTINCT ON (staff_pass_id) staff_pass_id, team_name
+		FROM staff_mappings
+		ORDER BY staff_pass_id, created_at DESC`)
+	if err != nil {
+		return fmt.Errorf("failed to query staff mappings for cache prewarm: %w", err)
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var staffPassID, teamName string
+		if err := rows.Scan(&staffPassID, &teamName); err != nil {
+			log.Printf("prewarm: skipping row: %v", err)
+			continue
+		}
+		if err := c.SetStaffTeam(ctx, staffPassID, teamName); err != nil {
+			log.Printf("prewarm: failed to cache staff:%s: %v", staffPassID, err)
+			continue
+		}
+		count++
+	}
+
+	log.Printf("Pre-warmed Redis cache with %d staff mappings", count)
+	return rows.Err()
 }

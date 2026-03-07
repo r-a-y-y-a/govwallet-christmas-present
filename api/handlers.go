@@ -8,10 +8,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type App struct {
-	DB *sql.DB
-}
-
 func SetupRoutes(app *App) *gin.Engine {
 	router := gin.Default()
 
