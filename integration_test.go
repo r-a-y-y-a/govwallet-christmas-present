@@ -556,7 +556,7 @@ func TestIntegration_CacheAsidePopulation(t *testing.T) {
 	}
 
 	// Call CheckEligibility — should populate cache via cache-aside
-	eligible, _, err := app.CheckEligibility("STAFF003")
+	eligible, _, _, err := app.CheckEligibility("STAFF003")
 	if err != nil {
 		t.Fatalf("CheckEligibility error: %v", err)
 	}
@@ -749,12 +749,15 @@ func TestIntegration_CheckEligibility_Eligible_ServiceLevel(t *testing.T) {
 	ctx := context.Background()
 
 	// STAFF015 → Team Eta (from CSV), no prior redemption
-	eligible, reason, err := app.CheckEligibility("STAFF015")
+	eligible, teamName, reason, err := app.CheckEligibility("STAFF015")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !eligible {
 		t.Errorf("expected eligible=true, got %v", eligible)
+	}
+	if teamName != "Team Eta" {
+		t.Errorf("expected team_name='Team Eta', got %q", teamName)
 	}
 	if reason != "Team 'Team Eta' is eligible for redemption" {
 		t.Errorf("unexpected reason: %s", reason)
@@ -770,7 +773,7 @@ func TestIntegration_CheckEligibility_Eligible_ServiceLevel(t *testing.T) {
 func TestIntegration_CheckEligibility_InvalidStaff_ServiceLevel(t *testing.T) {
 	app := integrationSetup(t)
 
-	eligible, reason, err := app.CheckEligibility("INVALID001")
+	eligible, _, reason, err := app.CheckEligibility("INVALID001")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -792,7 +795,7 @@ func TestIntegration_CheckEligibility_AlreadyRedeemed_ServiceLevel(t *testing.T)
 	}
 
 	// Now check eligibility — should report already redeemed
-	eligible, reason, err := app.CheckEligibility("STAFF015")
+	eligible, _, reason, err := app.CheckEligibility("STAFF015")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1151,5 +1154,82 @@ func TestIntegration_RedisCache_ConcurrentStaffTeam(t *testing.T) {
 	team, found, err := app.Cache.GetStaffTeam(ctx, "CONCURRENT001")
 	if err != nil || !found || team != "TeamParallel" {
 		t.Errorf("expected TeamParallel after concurrent writes, got found=%v team=%q err=%v", found, team, err)
+	}
+}
+
+// ── CRUD Cache Consistency Tests ───────────────────────────────────────────
+
+func TestIntegration_Handler_CreateRedemption_SyncsCache(t *testing.T) {
+	app := integrationSetup(t)
+	router := api.SetupRoutes(app)
+	ctx := context.Background()
+
+	// Create a redemption via CRUD with redeemed=true
+	body := `{"team_name":"Team Gamma","redeemed":true}`
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/redemptions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// The SETNX gate should now block a redeem attempt for a team member
+	// STAFF003 → Team Gamma
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodPost, "/api/v1/redeem/STAFF003", nil)
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409 Conflict after CRUD create, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify cache has the redemption locked
+	redeemed, found, _ := app.Cache.GetRedemptionStatus(ctx, "Team Gamma")
+	if !found || !redeemed {
+		t.Errorf("expected redemption locked in cache after CRUD create, got found=%v redeemed=%v", found, redeemed)
+	}
+}
+
+func TestIntegration_Handler_UpdateRedemption_SyncsCache(t *testing.T) {
+	app := integrationSetup(t)
+	router := api.SetupRoutes(app)
+	ctx := context.Background()
+
+	// First redeem Team Epsilon via STAFF007
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/redeem/STAFF007", nil)
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify team is locked in cache
+	redeemed, found, _ := app.Cache.GetRedemptionStatus(ctx, "Team Epsilon")
+	if !found || !redeemed {
+		t.Fatalf("expected Team Epsilon locked in cache, got found=%v redeemed=%v", found, redeemed)
+	}
+
+	// Update via CRUD to redeemed=false
+	body := `{"redeemed":false}`
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodPut, "/api/v1/redemptions/Team Epsilon", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Cache should be invalidated — team can redeem again
+	redeemed, found, _ = app.Cache.GetRedemptionStatus(ctx, "Team Epsilon")
+	if found && redeemed {
+		t.Errorf("expected cache cleared after update to redeemed=false, got found=%v redeemed=%v", found, redeemed)
+	}
+
+	// A new redeem attempt should now succeed
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodPost, "/api/v1/redeem/STAFF007", nil)
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201 after reversal, got %d: %s", w.Code, w.Body.String())
 	}
 }

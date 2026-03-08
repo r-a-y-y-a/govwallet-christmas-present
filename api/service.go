@@ -140,16 +140,16 @@ func (app *App) RedeemPresent(staffPassID string) (*RedeemResult, error) {
 
 // CheckEligibility checks if a staff pass ID is eligible for redemption.
 // Uses cache-aside for both staff mapping and redemption status lookups.
-func (app *App) CheckEligibility(staffPassID string) (bool, string, error) {
+func (app *App) CheckEligibility(staffPassID string) (bool, string, string, error) {
 	ctx := context.Background()
 
 	// ── Step 1: resolve staff → team (cache-aside) ─────────────────────
 	teamName, err := app.resolveTeamName(ctx, staffPassID)
 	if err == sql.ErrNoRows {
-		return false, "Invalid staff pass ID", nil
+		return false, "", "Invalid staff pass ID", nil
 	}
 	if err != nil {
-		return false, "", fmt.Errorf("failed to check eligibility: %w", err)
+		return false, "", "", fmt.Errorf("failed to check eligibility: %w", err)
 	}
 
 	// ── Step 2: check redemption status (cache-aside) ──────────────────
@@ -159,9 +159,9 @@ func (app *App) CheckEligibility(staffPassID string) (bool, string, error) {
 			log.Printf("cache: GetRedemptionStatus error (falling back to DB): %v", cacheErr)
 		} else if found {
 			if redeemed {
-				return false, fmt.Sprintf("Team '%s' has already redeemed", teamName), nil
+				return false, teamName, fmt.Sprintf("Team '%s' has already redeemed", teamName), nil
 			}
-			return true, fmt.Sprintf("Team '%s' is eligible for redemption", teamName), nil
+			return true, teamName, fmt.Sprintf("Team '%s' is eligible for redemption", teamName), nil
 		}
 	}
 
@@ -169,12 +169,12 @@ func (app *App) CheckEligibility(staffPassID string) (bool, string, error) {
 	var redeemed bool
 	err = app.DB.QueryRow("SELECT redeemed FROM redemptions WHERE team_name = $1", teamName).Scan(&redeemed)
 	if err != nil && err != sql.ErrNoRows {
-		return false, "", fmt.Errorf("failed to check team redemption status: %w", err)
+		return false, "", "", fmt.Errorf("failed to check team redemption status: %w", err)
 	}
 
 	if redeemed {
-		return false, fmt.Sprintf("Team '%s' has already redeemed", teamName), nil
+		return false, teamName, fmt.Sprintf("Team '%s' has already redeemed", teamName), nil
 	}
 
-	return true, fmt.Sprintf("Team '%s' is eligible for redemption", teamName), nil
+	return true, teamName, fmt.Sprintf("Team '%s' is eligible for redemption", teamName), nil
 }

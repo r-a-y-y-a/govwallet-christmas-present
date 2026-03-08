@@ -23,7 +23,7 @@ A Go-based API for managing Christmas gift redemptions across multiple teams. Us
 govtech-christmas/
 ├── main.go                    # HTTP API server, DB/Redis init, CSV loading, cache prewarm
 ├── main_test.go               # 8 unit tests (CSV parsing, env helpers)
-├── integration_test.go        # 34 integration tests (real PostgreSQL + Redis via Docker)
+├── integration_test.go        # 36 integration tests (real PostgreSQL + Redis via Docker)
 ├── api/
 │   ├── types.go               # App struct, data models (StaffMapping, Redemption)
 │   ├── handlers.go            # HTTP endpoint handlers, health check
@@ -59,6 +59,7 @@ govtech-christmas/
 | Write order | PostgreSQL first (durability), then Redis (performance) |
 | DB write failure | Redis key rolled back via `InvalidateRedemption` |
 | Ops reversal | DELETE endpoint invalidates cache immediately |
+| CRUD consistency | Create/update/delete endpoints sync Redis to match DB state |
 | Redis down | System degrades gracefully to DB-only reads; `/health` reports `"degraded"` |
 
 ## Quick Start
@@ -162,9 +163,9 @@ POST /api/v1/redeem/:staff_pass_id
 ```
 GET    /api/v1/redemptions                # List all
 GET    /api/v1/redemptions/:team_name     # Get by team
-POST   /api/v1/redemptions                # Create
-PUT    /api/v1/redemptions/:team_name     # Update
-DELETE /api/v1/redemptions/:team_name     # Delete (also invalidates cache)
+POST   /api/v1/redemptions                # Create (syncs cache if redeemed)
+PUT    /api/v1/redemptions/:team_name     # Update (syncs/invalidates cache)
+DELETE /api/v1/redemptions/:team_name     # Delete (invalidates cache)
 ```
 
 ### Staff Mappings
@@ -206,7 +207,7 @@ go test -v -count=1 -tags=integration ./...
 | Package | Tests | What's tested |
 |---------|-------|---------------|
 | `main` (root) | 8 | CSV parsing (valid/header-only/empty/invalid-timestamp/bad-columns/mixed), env var fallback |
-| `integration` | 34 | Real PostgreSQL + Redis via Docker: health check, staff mappings CRUD, lookup, cache prewarm, eligibility, full redemption round-trip, CRUD, 20-goroutine concurrent SETNX, cache-aside population, CSV file loading (valid/missing/empty), route registration, service-level RedeemPresent (success/invalid/already-redeemed), service-level CheckEligibility (eligible/invalid/already-redeemed), invalid JSON handling, update/delete not-found, delete cache invalidation, write-through cache, redemptions list, Redis CacheStore behavioral tests (miss/hit, key isolation, SETNX win/lose, invalidate + re-NX, noop invalidation, ping, 50-goroutine concurrent NX, concurrent writes) |
+| `integration` | 36 | Real PostgreSQL + Redis via Docker: health check, staff mappings CRUD, lookup, cache prewarm, eligibility, full redemption round-trip, CRUD, 20-goroutine concurrent SETNX, cache-aside population, CSV file loading (valid/missing/empty), route registration, service-level RedeemPresent (success/invalid/already-redeemed), service-level CheckEligibility (eligible/invalid/already-redeemed), invalid JSON handling, update/delete not-found, delete cache invalidation, write-through cache, redemptions list, CRUD cache consistency (create-syncs-cache, update-syncs-cache), Redis CacheStore behavioral tests (miss/hit, key isolation, SETNX win/lose, invalidate + re-NX, noop invalidation, ping, 50-goroutine concurrent NX, concurrent writes) |
 
 ## Environment Variables
 

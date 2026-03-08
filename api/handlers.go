@@ -119,6 +119,13 @@ func (app *App) createRedemption(c *gin.Context) {
 		return
 	}
 
+	// Sync cache so the SETNX gate is aware of this redemption
+	if app.Cache != nil && r.Redeemed {
+		if _, cacheErr := app.Cache.SetRedemptionNX(c.Request.Context(), r.TeamName); cacheErr != nil {
+			log.Printf("cache: SetRedemptionNX error for %s: %v", r.TeamName, cacheErr)
+		}
+	}
+
 	c.JSON(http.StatusCreated, r)
 }
 
@@ -147,6 +154,19 @@ func (app *App) updateRedemption(c *gin.Context) {
 	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Redemption not found"})
 		return
+	}
+
+	// Sync cache: mark redeemed or clear so team can redeem again
+	if app.Cache != nil {
+		if r.Redeemed {
+			if _, cacheErr := app.Cache.SetRedemptionNX(c.Request.Context(), teamName); cacheErr != nil {
+				log.Printf("cache: SetRedemptionNX error for %s: %v", teamName, cacheErr)
+			}
+		} else {
+			if cacheErr := app.Cache.InvalidateRedemption(c.Request.Context(), teamName); cacheErr != nil {
+				log.Printf("cache: InvalidateRedemption error for %s: %v", teamName, cacheErr)
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Redemption updated successfully"})
@@ -256,7 +276,7 @@ func (app *App) lookupStaffPass(c *gin.Context) {
 func (app *App) checkEligibility(c *gin.Context) {
 	staffPassID := c.Param("staff_pass_id")
 
-	eligible, reason, err := app.CheckEligibility(staffPassID)
+	eligible, teamName, reason, err := app.CheckEligibility(staffPassID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -264,6 +284,7 @@ func (app *App) checkEligibility(c *gin.Context) {
 
 	resp := gin.H{
 		"staff_pass_id": staffPassID,
+		"team_name":     teamName,
 		"eligible":      eligible,
 		"reason":        reason,
 	}
