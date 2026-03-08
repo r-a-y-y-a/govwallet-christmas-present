@@ -30,8 +30,7 @@ govtech-christmas/
 │   ├── service.go             # Business logic (RedeemPresent, CheckEligibility)
 │   └── cache/
 │       ├── store.go           # CacheStore interface
-│       ├── redis.go           # Redis implementation (SETNX, TTL)
-│       └── memory.go          # In-memory CacheStore for local development
+│       └── redis.go           # Redis implementation (SETNX, TTL)
 ├── data/
 │   └── staff_mappings.csv     # Staff-to-team mappings (loaded on startup)
 ├── docker-compose.yml         # PostgreSQL + Redis + App services
@@ -67,7 +66,7 @@ govtech-christmas/
 ### Prerequisites
 
 - Docker & Docker Compose
-- Go 1.21+ (for local development / running tests)
+- Go 1.25+ (for local development / running tests)
 
 ### Run with Docker Compose
 
@@ -87,7 +86,7 @@ docker-compose up postgres redis -d
 go run main.go
 
 # Run tests
-go test ./... -v
+go test -v ./...
 ```
 
 ## API Endpoints
@@ -192,14 +191,14 @@ STAFF_H123804820G,GRYFFINDOR,1623772799000
 
 ```bash
 # All unit tests (8 total)
-go test ./... -v
+go test -v ./...
 
 # Just root-level unit tests
 go test -v
 
 # Integration tests (requires Docker services running)
 docker-compose up postgres redis -d
-go test -tags integration -v -count=1
+go test -v -count=1 -tags=integration ./...
 ```
 
 ### Test Coverage
