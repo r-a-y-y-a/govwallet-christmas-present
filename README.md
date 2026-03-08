@@ -1,211 +1,122 @@
-Current to-do list:
-1. Basic unit tests for quick start-up health
-2. Adjust PostgreSQL tables to fit the context of the problem more (i.e. redemptions should all be false and then updated as it goes)
-3. Simulate redemptions for testing
-4. Trim down CRUD operations (delete operation likely not necessary)
-
 # GovTech Christmas Redemption System
 
-A Go-based redemption system with PostgreSQL persistence for managing Christmas gift redemptions.
+A Go-based API for managing Christmas gift redemptions across multiple teams. Uses PostgreSQL as the source of truth and Redis as a fast cache layer with atomic SETNX-based concurrency control for multi-desk environments.
 
-## Features
+## Assessment Disclaimer
 
-- **CLI Interface**: Interactive command-line interface for staff to redeem presents by entering their Staff Pass ID
-- **REST API Server**: Full HTTP API for programmatic access (optional)
-- **Database Persistence**: PostgreSQL backend with automatic table creation
-- **CSV Data Loading**: Automatically loads staff mappings from CSV files
+> **This project is built for a technical assessment and is not fully production-ready.**
+>
+> Key limitation: `init.sql` contains sample data with `INSERT INTO redemptions ... ('Team Alpha', TRUE), ('Team Beta', TRUE)`. Every time the Docker PostgreSQL container is created from scratch (e.g. after `docker-compose down -v` or deleting the volume), the database is re-initialised with these rows — meaning those teams start as "already redeemed". The Redis cache is then pre-warmed from this state.
+>
+> In a production system:
+> - `init.sql` would only create the schema and indexes, not insert sample data. The database would also probably exist beforehand and persist across instances of this service. The only programs constantly being reset would be the golang services and the redis cache.
+> - Database migrations would be managed by a tool like `golang-migrate` or `goose`
+> - Redis would use a password and TLS
+> - Secrets would not be hardcoded in `docker-compose.yml` or `.env`
+> - The health check endpoint would not expose internal service names
+>
+> These trade-offs were made intentionally to keep the assessment submission self-contained and easy to spin up with a single `docker-compose up`.
 
 ## Architecture
 
 ```
 govtech-christmas/
-├── main.go              # CLI application entry point
-├── cmd/
-│   └── server/
-│       └── main.go      # HTTP API server entry point
+├── main.go                    # HTTP API server, DB/Redis init, CSV loading, cache prewarm
+├── main_test.go               # 23 integration tests (CSV, routes, redemption, eligibility)
 ├── api/
-│   ├── handlers.go      # HTTP request handlers
-│   ├── service.go       # Business logic layer
-│   └── types.go         # Data models
+│   ├── types.go               # App struct, data models (StaffMapping, Redemption)
+│   ├── handlers.go            # HTTP endpoint handlers, health check
+│   ├── service.go             # Business logic (RedeemPresent, CheckEligibility)
+│   └── cache/
+│       ├── store.go           # CacheStore interface
+│       ├── redis.go           # Redis implementation (SETNX, TTL)
+│       ├── memory.go          # In-memory mock for unit tests
+│       └── memory_test.go     # 9 cache unit tests (incl. concurrency)
 ├── data/
-│   └── staff_mappings.csv
-└── init.sql             # Database initialization script
+│   └── staff_mappings.csv     # Staff-to-team mappings (loaded on startup)
+├── docker-compose.yml         # PostgreSQL + Redis + App services
+├── Dockerfile                 # Multi-stage Go build
+├── init.sql                   # DB schema, indexes, sample data
+├── go.mod / go.sum            # Go module dependencies
+└── .env                       # Environment variables
 ```
 
-## User Stories
+## How It Works
 
-### Counter Staff Functions
-1. As counter staff, I want to look up a representative by staff pass ID to see which team they belong to.  
-2. As counter staff, I want invalid staff pass IDs to be rejected so I do not give gifts to ineligible people.  
-3. As counter staff, I want the system to use the latest mapping record (`created_at`) for a staff pass ID.  
-4. As counter staff, I want to check whether a team has already redeemed its gift.  
-5. As counter staff, I want an immediate "eligible/not eligible" response when I input a staff pass ID.  
-6. As counter staff, I want confirmation when a redemption has been successfully recorded.  
+### Data Flow
 
-### System Functions
-7. As the system, I want to look up past redemptions by team name to determine eligibility.  
-8. As the system, I want to record a new redemption with team name and `redeemed_at` timestamp when valid.  
-9. As the system, I must not create a new redemption record if the team has already redeemed.  
+1. **Startup**: PostgreSQL tables created via `init.sql` → CSV staff mappings loaded into DB → Redis cache pre-warmed with all staff-to-team mappings
+2. **Eligibility check**: Cache-aside lookup (Redis hit → return, miss → DB query → populate cache)
+3. **Redemption**: Staff lookup (cache-aside) → `SETNX` atomic gate in Redis (only first desk wins) → write to PostgreSQL → on DB failure, rollback cache via `InvalidateRedemption`
+4. **Reversal**: `DELETE /api/v1/redemptions/:team_name` removes from DB then invalidates Redis cache
 
-### Representative Experience
-10. As a representative, I want to be clearly informed if my team has already redeemed its gift.  
+### Redis Cache Strategy
 
-### Developer & Operations Requirements
-11. As a developer, I want the redemption data store to be pluggable so storage can change without rewriting business logic.  
-12. As a developer, I want unit tests for lookup, eligibility checks, and redemption creation.  
-13. As an operator, I want simple commands or an HTTP API to trigger staff ID lookup and redemption.  
-14. As an operator, I want clear error messages when the mapping CSV cannot be read or is malformed.
-15. As an operator, I want fast look-up and low load times even when multiple redemption desks are requesting the look-up service
-
-### Non-Functional Requirements
-- Fast look-up even when under heavy load (i.e. multiple operators)
-- No more than 5 minutes of redemption data dropped in the event of a crash
+| Concern | Approach |
+|---------|----------|
+| Staff lookups | Cache-aside with 1h TTL (static data, pre-warmed on startup) |
+| Redemption status | SETNX atomic gate with 24h TTL |
+| Concurrent desks | Redis `SETNX` — single-threaded, exactly one desk wins |
+| Write order | PostgreSQL first (durability), then Redis (performance) |
+| DB write failure | Redis key rolled back via `InvalidateRedemption` |
+| Ops reversal | DELETE endpoint invalidates cache immediately |
+| Redis down | System degrades gracefully to DB-only reads; `/health` reports `"degraded"` |
 
 ## Quick Start
 
 ### Prerequisites
-- Docker & Docker Compose (for database)
-- Go 1.21+ 
 
-### Option 1: CLI Interface (Recommended for Counter Staff)
+- Docker & Docker Compose
+- Go 1.21+ (for local development / running tests)
 
-This interactive CLI allows staff to redeem presents by entering their Staff Pass ID.
-
-1. **Start the database:**
-```bash
-docker-compose up postgres -d
-```
-
-2. **Run the CLI application:**
-```bash
-go run main.go
-```
-
-3. **Use the interface:**
-```
-============================================================
-    🎄 GovTech Christmas Present Redemption System 🎁
-============================================================
-
-Enter your Staff Pass ID (or 'quit' to exit): STAFF001
-
-✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨
-✅ SUCCESS! Successfully redeemed present for team 'Team Alpha'!
-   Team: Team Alpha
-   Redeemed at: 2026-03-07 14:30:45
-✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨
-
-Enter your Staff Pass ID (or 'quit' to exit): STAFF001
-
-❌ FAILED: Team 'Team Alpha' has already redeemed their present
-
-Enter your Staff Pass ID (or 'quit' to exit): quit
-
-👋 Thank you for using the redemption system. Goodbye!
-```
-
-### Option 2: HTTP API Server
-
-For programmatic access or integration with other systems.
-
-1. **Start the database:**
-```bash
-docker-compose up postgres -d
-```
-
-2. **Run the API server:**
-```bash
-go run cmd/server/main.go
-```
-
-3. **Access the API endpoints:**
-
-**Health Check:**
-```bash
-curl http://localhost:8080/health
-```
-
-**Check Eligibility:**
-```bash
-curl http://localhost:8080/api/v1/eligibility/STAFF001
-```
-
-**Redeem Present:**
-```bash
-curl -X POST http://localhost:8080/api/v1/redeem/STAFF001
-```
-
-**List All Redemptions:**
-```bash
-curl http://localhost:8080/api/v1/redemptions
-```
-
-### Option 3: Running with Docker Compose
-
-To run everything in containers:
+### Run with Docker Compose
 
 ```bash
 docker-compose up -d
 ```
 
-This will start both the database and the API server. Access the API at `http://localhost:8080`.
+This starts PostgreSQL, Redis, and the API server. The API is available at `http://localhost:8080`.
 
-### Database Access
+### Run Locally (development)
 
-- **Host:** localhost
-- **Port:** 5432
-- **Database:** govtech_christmas
-- **Username:** postgres
-- **Password:** password123
+```bash
+# Start dependencies
+docker-compose up postgres redis -d
 
-### CSV Data
+# Run the server
+go run main.go
 
-Place your CSV files in the `./data` directory. The application automatically loads them on startup.
-
-**Staff Mappings CSV Format:** (`staff_mappings.csv`)
-```csv
-staff_pass_id,team_name,created_at
-STAFF001,Team Alpha,1703462400000
-STAFF002,Team Beta,1703548800000
-STAFF003,Team Gamma,1703635200000
+# Run tests
+go test ./... -v
 ```
 
-- `staff_pass_id`: Unique identifier for staff member
-- `team_name`: Name of the team the staff belongs to  
-- `created_at`: Timestamp when mapping was created (epoch milliseconds)
+## API Endpoints
 
-### API Endpoints
+### Health Check
 
-#### Health Check
-```bash
+```
 GET /health
 ```
 
-#### Staff Mappings
-```bash
-GET /api/v1/staff-mappings                    # List all staff mappings
-GET /api/v1/staff-mappings/{staff_pass_id}    # Get specific staff mapping
+Returns DB and cache health:
+
+```json
+{
+  "status": "healthy",
+  "service": "govtech-christmas-redemption",
+  "database": true,
+  "cache": true
+}
 ```
 
-#### Staff Pass Lookup & Operations
-```bash
-GET  /api/v1/lookup/{staff_pass_id}           # Lookup staff pass validity and team
-GET  /api/v1/eligibility/{staff_pass_id}      # Check redemption eligibility
-POST /api/v1/redeem/{staff_pass_id}           # Redeem gift for staff member
+Status values: `"healthy"` (all systems up), `"degraded"` (Redis down, DB ok), `"unhealthy"` (DB down).
+
+### Staff Pass Lookup
+
+```
+GET /api/v1/lookup/:staff_pass_id
 ```
 
-#### Redemptions Management
-```bash
-GET    /api/v1/redemptions              # List all redemptions
-GET    /api/v1/redemptions/{team_name}  # Get specific redemption by team name
-POST   /api/v1/redemptions              # Create new redemption
-PUT    /api/v1/redemptions/{team_name}  # Update redemption
-DELETE /api/v1/redemptions/{team_name}  # Delete redemption
-```
-
-### Example API Responses
-
-**Staff Lookup Response:**
 ```json
 {
   "staff_pass_id": "STAFF001",
@@ -215,7 +126,12 @@ DELETE /api/v1/redemptions/{team_name}  # Delete redemption
 }
 ```
 
-**Eligibility Check (Eligible):**
+### Eligibility Check
+
+```
+GET /api/v1/eligibility/:staff_pass_id
+```
+
 ```json
 {
   "staff_pass_id": "STAFF001",
@@ -225,17 +141,12 @@ DELETE /api/v1/redemptions/{team_name}  # Delete redemption
 }
 ```
 
-**Eligibility Check (Already Redeemed):**
-```json
-{
-  "staff_pass_id": "STAFF001",
-  "team_name": "Team Alpha",
-  "eligible": false,
-  "reason": "Team has already redeemed"
-}
+### Redeem Present
+
+```
+POST /api/v1/redeem/:staff_pass_id
 ```
 
-**Successful Redemption:**
 ```json
 {
   "message": "Redemption successful",
@@ -246,77 +157,68 @@ DELETE /api/v1/redemptions/{team_name}  # Delete redemption
   }
 }
 ```
-  "mapping_created_at": 1703462400000
-}
-```
 
-**Eligibility Check Response:**
-```json
-{
-  "staff_pass_id": "STAFF003",
-  "team_name": "Team Gamma",
-  "eligible": true,
-  "reason": "Team is eligible for redemption"
-}
-```
-
-**Redemption Record:**
-```json
-{
-  "id": 1,
-  "team_name": "Team Alpha",
-  "redeemed_at": "2025-12-15T10:30:00Z",
-  "staff_pass_id": "STAFF001",
-  "created_at": "2025-12-15T10:30:00Z",
-  "updated_at": "2025-12-15T10:30:00Z"
-}
-```
-
-**Staff Mapping Record:**
-```json
-{
-  "id": 1,
-  "staff_pass_id": "STAFF001",
-  "team_name": "Team Alpha",
-  "created_at": 1703462400000
-}
-```
-
-## Project Structure
+### Redemptions CRUD
 
 ```
-├── main.go              # Application entrypoint
-├── docker-compose.yml   # Docker services configuration
-├── Dockerfile           # Go application container
-├── init.sql             # Database initialization
-├── .env                 # Environment variables
-├── data/                # CSV data directory
-└── README.md            # This file
+GET    /api/v1/redemptions                # List all
+GET    /api/v1/redemptions/:team_name     # Get by team
+POST   /api/v1/redemptions                # Create
+PUT    /api/v1/redemptions/:team_name     # Update
+DELETE /api/v1/redemptions/:team_name     # Delete (also invalidates cache)
 ```
 
-## Current Status
+### Staff Mappings
 
-✅ Docker environment with PostgreSQL  
-✅ Go application entrypoint with HTTP API  
-✅ Staff pass ID to team mapping system  
-✅ CSV data loading from staff_mappings.csv  
-✅ Staff pass lookup functionality  
-✅ Team eligibility checking  
-✅ Redemption workflow with duplicate prevention  
-✅ Complete CRUD API for redemptions and staff mappings  
+```
+GET /api/v1/staff-mappings                      # List all
+GET /api/v1/staff-mappings/:staff_pass_id       # Get by staff pass ID
+```
 
-### Core Features Working
-- **Staff Pass Lookup**: Validate staff ID and get team information
-- **Eligibility Checking**: Determine if team can redeem (prevents duplicates)
-- **Redemption Process**: Complete workflow from lookup to redemption recording
-- **Data Persistence**: All data stored in PostgreSQL with proper indexing
-- **CSV Integration**: Auto-loads staff mappings from CSV file
+## CSV Data Format
 
-### Next Steps (Optional Enhancements)
-1. Add authentication and authorization
-2. Implement audit logging
-3. Add bulk operations support
-4. Create admin dashboard
-5. Add comprehensive error handling and validation
-6. Implement rate limiting
-7. Add unit and integration tests
+Place `staff_mappings.csv` in the `data/` directory:
+
+```csv
+staff_pass_id,team_name,created_at
+STAFF_H123804820G,GRYFFINDOR,1623772799000
+```
+
+- `staff_pass_id` — unique staff identifier
+- `team_name` — team the staff belongs to
+- `created_at` — epoch milliseconds (latest mapping per staff pass ID is used)
+
+## Testing
+
+```bash
+# All tests (32 total across 2 packages)
+go test ./... -v
+
+# Just cache unit tests
+go test ./api/cache/... -v
+
+# Just integration tests
+go test -v
+```
+
+### Test Coverage
+
+| Package | Tests | What's tested |
+|---------|-------|---------------|
+| `main` (root) | 23 | CSV parsing, file loading, env vars, route setup, redemption (success/invalid/already-redeemed/DB errors), eligibility (eligible/invalid/already-redeemed/DB errors), cache-aside population, SETNX gate, cache rollback on DB failure |
+| `api/cache` | 9 | Staff team miss/hit, key isolation, SETNX win/lose, invalidation + re-SETNX, noop invalidation, ping, 50-goroutine concurrency (exactly 1 winner), concurrent writes |
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_HOST` | `localhost` | PostgreSQL host |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_NAME` | `govtech_christmas` | Database name |
+| `DB_USER` | `postgres` | Database user |
+| `DB_PASSWORD` | `password123` | Database password |
+| `REDIS_HOST` | `localhost` | Redis host |
+| `REDIS_PORT` | `6379` | Redis port |
+| `REDIS_PASSWORD` | _(empty)_ | Redis password |
+| `REDIS_DB` | `0` | Redis database number |
+| `APP_PORT` | `8080` | HTTP server port |
