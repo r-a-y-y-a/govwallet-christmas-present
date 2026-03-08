@@ -203,14 +203,7 @@ func (app *App) getStaffMappings(c *gin.Context) {
 func (app *App) getStaffMapping(c *gin.Context) {
 	staffPassID := c.Param("staff_pass_id")
 
-	var m StaffMapping
-	err := app.DB.QueryRow(`
-		SELECT id, staff_pass_id, team_name, created_at 
-		FROM staff_mappings 
-		WHERE staff_pass_id = $1 
-		ORDER BY created_at DESC 
-		LIMIT 1`, staffPassID).Scan(&m.ID, &m.StaffPassID, &m.TeamName, &m.CreatedAt)
-
+	m, err := app.findStaffMappingByPassID(staffPassID)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Staff mapping not found"})
 		return
@@ -232,14 +225,7 @@ func (app *App) getStaffMapping(c *gin.Context) {
 func (app *App) lookupStaffPass(c *gin.Context) {
 	staffPassID := c.Param("staff_pass_id")
 
-	var m StaffMapping
-	err := app.DB.QueryRow(`
-		SELECT id, staff_pass_id, team_name, created_at 
-		FROM staff_mappings 
-		WHERE staff_pass_id = $1 
-		ORDER BY created_at DESC 
-		LIMIT 1`, staffPassID).Scan(&m.ID, &m.StaffPassID, &m.TeamName, &m.CreatedAt)
-
+	m, err := app.findStaffMappingByPassID(staffPassID)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error":         "Invalid staff pass ID",

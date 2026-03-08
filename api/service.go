@@ -15,6 +15,22 @@ type RedeemResult struct {
 	Redemption *Redemption
 }
 
+// findStaffMappingByPassID returns the latest staff mapping for a given
+// staff pass ID, or sql.ErrNoRows if none exists.
+func (app *App) findStaffMappingByPassID(staffPassID string) (*StaffMapping, error) {
+	var m StaffMapping
+	err := app.DB.QueryRow(`
+		SELECT id, staff_pass_id, team_name, created_at
+		FROM staff_mappings
+		WHERE staff_pass_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1`, staffPassID).Scan(&m.ID, &m.StaffPassID, &m.TeamName, &m.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 // resolveTeamName looks up the team name for a staff pass ID,
 // checking the cache first (cache-aside) then falling back to the DB.
 func (app *App) resolveTeamName(ctx context.Context, staffPassID string) (string, error) {
@@ -29,24 +45,18 @@ func (app *App) resolveTeamName(ctx context.Context, staffPassID string) (string
 	}
 
 	// 2. DB lookup
-	var teamName string
-	err := app.DB.QueryRow(`
-		SELECT team_name
-		FROM staff_mappings
-		WHERE staff_pass_id = $1
-		ORDER BY created_at DESC
-		LIMIT 1`, staffPassID).Scan(&teamName)
+	m, err := app.findStaffMappingByPassID(staffPassID)
 	if err != nil {
 		return "", err // caller handles sql.ErrNoRows
 	}
 
 	// 3. Populate cache on miss
 	if app.Cache != nil {
-		if cacheErr := app.Cache.SetStaffTeam(ctx, staffPassID, teamName); cacheErr != nil {
+		if cacheErr := app.Cache.SetStaffTeam(ctx, staffPassID, m.TeamName); cacheErr != nil {
 			log.Printf("cache: SetStaffTeam error: %v", cacheErr)
 		}
 	}
-	return teamName, nil
+	return m.TeamName, nil
 }
 
 // RedeemPresent attempts to redeem a present for a given staff pass ID.

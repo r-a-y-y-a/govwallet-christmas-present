@@ -1,0 +1,45 @@
+# Binaries
+*.exe
+*.out
+*.bin
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+*.test
+
+# Dependency directories
+vendor/
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python virtual environments
+.venv/
+venv/
+
+# Logs
+*.log
+
+# Ignore database files
+*.db
+*.sqlite
+
+# Ignore coverage files
+coverage.out
+
+# Ignore by name (built binaries)
+cli
+cli.exe
+server
+server.exe
+healthcheck
+healthcheck.exe
