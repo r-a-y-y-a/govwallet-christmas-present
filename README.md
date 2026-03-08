@@ -30,7 +30,8 @@ govtech-christmas/
 │   ├── service.go             # Business logic (RedeemPresent, CheckEligibility)
 │   └── cache/
 │       ├── store.go           # CacheStore interface
-│       └── redis.go           # Redis implementation (SET, TTL)
+│       ├── redis.go           # Redis implementation (SET, TTL)
+│       └── memory.go          # In-memory implementation (integration tests)
 ├── data/
 │   └── staff_mappings.csv     # Staff-to-team mappings (loaded on startup)
 ├── docker-compose.yml         # PostgreSQL + Redis + App services
@@ -137,7 +138,7 @@ GET /api/v1/eligibility/:staff_pass_id
   "staff_pass_id": "STAFF001",
   "team_name": "Team Alpha",
   "eligible": true,
-  "reason": "Team is eligible for redemption"
+  "reason": "Team 'Team Alpha' is eligible for redemption"
 }
 ```
 
