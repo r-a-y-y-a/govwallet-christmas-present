@@ -276,7 +276,8 @@ func TestRedeemPresent_SuccessfulRedemption(t *testing.T) {
 	}
 	defer db.Close()
 
-	app := &api.App{DB: db, Cache: cache.NewMemoryCache()}
+	mc := cache.NewMemoryCache()
+	app := &api.App{DB: db, Cache: mc}
 
 	// Mock staff pass validation query
 	mock.ExpectQuery(`SELECT team_name FROM staff_mappings WHERE staff_pass_id = \$1 ORDER BY created_at DESC LIMIT 1`).
@@ -308,6 +309,15 @@ func TestRedeemPresent_SuccessfulRedemption(t *testing.T) {
 	}
 	if !strings.Contains(result.Message, "Successfully redeemed") {
 		t.Errorf("expected success message, got: %s", result.Message)
+	}
+
+	// Verify cache was populated: staff team cached via cache-aside, redemption locked via SETNX
+	ctx := context.Background()
+	if team, found, cacheErr := mc.GetStaffTeam(ctx, "STAFF001"); !found || team != "Team Alpha" || cacheErr != nil {
+		t.Errorf("expected staff team in cache, got found=%v team=%q err=%v", found, team, cacheErr)
+	}
+	if redeemed, found, cacheErr := mc.GetRedemptionStatus(ctx, "Team Alpha"); !found || !redeemed || cacheErr != nil {
+		t.Errorf("expected redemption locked in cache, got found=%v redeemed=%v err=%v", found, redeemed, cacheErr)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -431,7 +441,8 @@ func TestRedeemPresent_DatabaseErrorDuringRedemptionCreation(t *testing.T) {
 	}
 	defer db.Close()
 
-	app := &api.App{DB: db, Cache: cache.NewMemoryCache()}
+	mc := cache.NewMemoryCache()
+	app := &api.App{DB: db, Cache: mc}
 
 	// Mock staff pass validation query
 	mock.ExpectQuery(`SELECT team_name FROM staff_mappings WHERE staff_pass_id = \$1 ORDER BY created_at DESC LIMIT 1`).
@@ -456,6 +467,16 @@ func TestRedeemPresent_DatabaseErrorDuringRedemptionCreation(t *testing.T) {
 		t.Errorf("expected redemption creation error, got: %s", err.Error())
 	}
 
+	// Verify SETNX was rolled back via InvalidateRedemption — cache should not hold a lock
+	ctx := context.Background()
+	if _, found, cacheErr := mc.GetRedemptionStatus(ctx, "Team Alpha"); found || cacheErr != nil {
+		t.Errorf("expected redemption cache rolled back, got found=%v err=%v", found, cacheErr)
+	}
+	// Staff team should still be cached (resolveTeamName populated it before the failure)
+	if team, found, cacheErr := mc.GetStaffTeam(ctx, "STAFF001"); !found || team != "Team Alpha" || cacheErr != nil {
+		t.Errorf("expected staff team in cache, got found=%v team=%q err=%v", found, team, cacheErr)
+	}
+
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectation: %v", err)
 	}
@@ -470,7 +491,8 @@ func TestCheckEligibility_ValidStaffPassEligibleTeam(t *testing.T) {
 	}
 	defer db.Close()
 
-	app := &api.App{DB: db, Cache: cache.NewMemoryCache()}
+	mc := cache.NewMemoryCache()
+	app := &api.App{DB: db, Cache: mc}
 
 	// Mock staff pass validation query
 	mock.ExpectQuery(`SELECT team_name FROM staff_mappings WHERE staff_pass_id = \$1 ORDER BY created_at DESC LIMIT 1`).
@@ -492,6 +514,20 @@ func TestCheckEligibility_ValidStaffPassEligibleTeam(t *testing.T) {
 	}
 	if reason != "Team 'Team Alpha' is eligible for redemption" {
 		t.Errorf("expected eligible reason, got: %s", reason)
+	}
+
+	// Verify staff team was cached via cache-aside on the DB miss
+	ctx := context.Background()
+	if team, found, cacheErr := mc.GetStaffTeam(ctx, "STAFF001"); !found || team != "Team Alpha" || cacheErr != nil {
+		t.Errorf("expected staff team in cache after eligibility check, got found=%v team=%q err=%v", found, team, cacheErr)
+	}
+	// Second call: staff team served from cache (no staff DB mock registered).
+	// Redemption status is not cached by CheckEligibility, so one more DB query is needed.
+	mock.ExpectQuery(`SELECT redeemed FROM redemptions WHERE team_name = \$1`).
+		WithArgs("Team Alpha").
+		WillReturnError(sql.ErrNoRows)
+	if _, _, err = app.CheckEligibility("STAFF001"); err != nil {
+		t.Errorf("second call unexpected error: %v", err)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -537,18 +573,21 @@ func TestCheckEligibility_TeamAlreadyRedeemed(t *testing.T) {
 	}
 	defer db.Close()
 
-	app := &api.App{DB: db, Cache: cache.NewMemoryCache()}
+	mc := cache.NewMemoryCache()
+	// Pre-populate both staff team and redemption status in cache.
+	// Neither DB lookup should occur — this is a pure cache path.
+	ctx := context.Background()
+	if setErr := mc.SetStaffTeam(ctx, "STAFF001", "Team Alpha"); setErr != nil {
+		t.Fatalf("failed to pre-populate staff team cache: %v", setErr)
+	}
+	if _, setErr := mc.SetRedemptionNX(ctx, "Team Alpha"); setErr != nil {
+		t.Fatalf("failed to pre-populate redemption cache: %v", setErr)
+	}
 
-	// Mock staff pass validation query
-	mock.ExpectQuery(`SELECT team_name FROM staff_mappings WHERE staff_pass_id = \$1 ORDER BY created_at DESC LIMIT 1`).
-		WithArgs("STAFF001").
-		WillReturnRows(sqlmock.NewRows([]string{"team_name"}).AddRow("Team Alpha"))
+	app := &api.App{DB: db, Cache: mc}
 
-	// Mock redemption check query returning already redeemed
-	mock.ExpectQuery(`SELECT redeemed FROM redemptions WHERE team_name = \$1`).
-		WithArgs("Team Alpha").
-		WillReturnRows(sqlmock.NewRows([]string{"redeemed"}).AddRow(true))
-
+	// No DB mock expectations registered — any DB call would cause sqlmock to return an error,
+	// which would fail the test, proving the cache was used exclusively.
 	eligible, reason, err := app.CheckEligibility("STAFF001")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -561,8 +600,9 @@ func TestCheckEligibility_TeamAlreadyRedeemed(t *testing.T) {
 		t.Errorf("expected already redeemed reason, got: %s", reason)
 	}
 
+	// Confirm no DB calls occurred (mock has no expectations, any call would have failed above)
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("unfulfilled expectation: %v", err)
+		t.Errorf("unexpected DB calls: %v", err)
 	}
 }
 
@@ -606,7 +646,8 @@ func TestCheckEligibility_DatabaseErrorDuringRedemptionCheck(t *testing.T) {
 	}
 	defer db.Close()
 
-	app := &api.App{DB: db, Cache: cache.NewMemoryCache()}
+	mc := cache.NewMemoryCache()
+	app := &api.App{DB: db, Cache: mc}
 
 	// Mock staff pass validation query
 	mock.ExpectQuery(`SELECT team_name FROM staff_mappings WHERE staff_pass_id = \$1 ORDER BY created_at DESC LIMIT 1`).
@@ -630,6 +671,12 @@ func TestCheckEligibility_DatabaseErrorDuringRedemptionCheck(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to check team redemption status") {
 		t.Errorf("expected team redemption status error, got: %s", err.Error())
+	}
+
+	// Verify staff team was cached even though the redemption DB check failed
+	ctx := context.Background()
+	if team, found, cacheErr := mc.GetStaffTeam(ctx, "STAFF001"); !found || team != "Team Alpha" || cacheErr != nil {
+		t.Errorf("expected staff team cached despite redemption check error, got found=%v team=%q err=%v", found, team, cacheErr)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
