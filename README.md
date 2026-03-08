@@ -22,7 +22,8 @@ A Go-based API for managing Christmas gift redemptions across multiple teams. Us
 ```
 govtech-christmas/
 ├── main.go                    # HTTP API server, DB/Redis init, CSV loading, cache prewarm
-├── main_test.go               # 23 integration tests (CSV, routes, redemption, eligibility)
+├── main_test.go               # 8 unit tests (CSV parsing, env helpers)
+├── integration_test.go        # 34 integration tests (real PostgreSQL + Redis via Docker)
 ├── api/
 │   ├── types.go               # App struct, data models (StaffMapping, Redemption)
 │   ├── handlers.go            # HTTP endpoint handlers, health check
@@ -30,8 +31,7 @@ govtech-christmas/
 │   └── cache/
 │       ├── store.go           # CacheStore interface
 │       ├── redis.go           # Redis implementation (SETNX, TTL)
-│       ├── memory.go          # In-memory mock for unit tests
-│       └── memory_test.go     # 9 cache unit tests (incl. concurrency)
+│       └── memory.go          # In-memory CacheStore for local development
 ├── data/
 │   └── staff_mappings.csv     # Staff-to-team mappings (loaded on startup)
 ├── docker-compose.yml         # PostgreSQL + Redis + App services
@@ -191,22 +191,23 @@ STAFF_H123804820G,GRYFFINDOR,1623772799000
 ## Testing
 
 ```bash
-# All tests (32 total across 2 packages)
+# All unit tests (8 total)
 go test ./... -v
 
-# Just cache unit tests
-go test ./api/cache/... -v
-
-# Just integration tests
+# Just root-level unit tests
 go test -v
+
+# Integration tests (requires Docker services running)
+docker-compose up postgres redis -d
+go test -tags integration -v -count=1
 ```
 
 ### Test Coverage
 
 | Package | Tests | What's tested |
 |---------|-------|---------------|
-| `main` (root) | 23 | CSV parsing, file loading, env vars, route setup, redemption (success/invalid/already-redeemed/DB errors), eligibility (eligible/invalid/already-redeemed/DB errors), cache-aside population, SETNX gate, cache rollback on DB failure |
-| `api/cache` | 9 | Staff team miss/hit, key isolation, SETNX win/lose, invalidation + re-SETNX, noop invalidation, ping, 50-goroutine concurrency (exactly 1 winner), concurrent writes |
+| `main` (root) | 8 | CSV parsing (valid/header-only/empty/invalid-timestamp/bad-columns/mixed), env var fallback |
+| `integration` | 34 | Real PostgreSQL + Redis via Docker: health check, staff mappings CRUD, lookup, cache prewarm, eligibility, full redemption round-trip, CRUD, 20-goroutine concurrent SETNX, cache-aside population, CSV file loading (valid/missing/empty), route registration, service-level RedeemPresent (success/invalid/already-redeemed), service-level CheckEligibility (eligible/invalid/already-redeemed), invalid JSON handling, update/delete not-found, delete cache invalidation, write-through cache, redemptions list, Redis CacheStore behavioral tests (miss/hit, key isolation, SETNX win/lose, invalidate + re-NX, noop invalidation, ping, 50-goroutine concurrent NX, concurrent writes) |
 
 ## Environment Variables
 
