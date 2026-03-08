@@ -203,7 +203,6 @@ func (app *App) getStaffMappings(c *gin.Context) {
 func (app *App) getStaffMapping(c *gin.Context) {
 	staffPassID := c.Param("staff_pass_id")
 
-	// Get the latest mapping for this staff pass ID
 	var m StaffMapping
 	err := app.DB.QueryRow(`
 		SELECT id, staff_pass_id, team_name, created_at 
@@ -221,6 +220,11 @@ func (app *App) getStaffMapping(c *gin.Context) {
 		return
 	}
 
+	// Populate cache for future resolveTeamName lookups
+	if app.Cache != nil {
+		_ = app.Cache.SetStaffTeam(c.Request.Context(), staffPassID, m.TeamName)
+	}
+
 	c.JSON(http.StatusOK, m)
 }
 
@@ -228,7 +232,6 @@ func (app *App) getStaffMapping(c *gin.Context) {
 func (app *App) lookupStaffPass(c *gin.Context) {
 	staffPassID := c.Param("staff_pass_id")
 
-	// Get the latest mapping for this staff pass ID
 	var m StaffMapping
 	err := app.DB.QueryRow(`
 		SELECT id, staff_pass_id, team_name, created_at 
@@ -250,6 +253,11 @@ func (app *App) lookupStaffPass(c *gin.Context) {
 		return
 	}
 
+	// Populate cache for future resolveTeamName lookups
+	if app.Cache != nil {
+		_ = app.Cache.SetStaffTeam(c.Request.Context(), staffPassID, m.TeamName)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"staff_pass_id":      m.StaffPassID,
 		"team_name":          m.TeamName,
@@ -258,116 +266,52 @@ func (app *App) lookupStaffPass(c *gin.Context) {
 	})
 }
 
-// Check eligibility for redemption
+// Check eligibility for redemption — delegates to service layer (cache-aware)
 func (app *App) checkEligibility(c *gin.Context) {
 	staffPassID := c.Param("staff_pass_id")
 
-	// First, check if staff pass ID is valid and get team name
-	var teamName string
-	err := app.DB.QueryRow(`
-		SELECT team_name 
-		FROM staff_mappings 
-		WHERE staff_pass_id = $1 
-		ORDER BY created_at DESC 
-		LIMIT 1`, staffPassID).Scan(&teamName)
-
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusOK, gin.H{
-			"staff_pass_id": staffPassID,
-			"eligible":      false,
-			"reason":        "Invalid staff pass ID",
-		})
-		return
-	}
+	eligible, reason, err := app.CheckEligibility(staffPassID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check eligibility"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Check if team has already redeemed
-	var redeemed bool
-	err = app.DB.QueryRow("SELECT redeemed FROM redemptions WHERE team_name = $1", teamName).Scan(&redeemed)
-	if err != nil && err != sql.ErrNoRows {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check team redemption status"})
-		return
-	}
-
-	if redeemed {
-		c.JSON(http.StatusOK, gin.H{
-			"staff_pass_id": staffPassID,
-			"team_name":     teamName,
-			"eligible":      false,
-			"reason":        "Team has already redeemed",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"staff_pass_id": staffPassID,
-		"team_name":     teamName,
-		"eligible":      true,
-		"reason":        "Team is eligible for redemption",
-	})
+		"eligible":      eligible,
+		"reason":        reason,
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
-// Redeem for a specific staff member
+// Redeem for a specific staff member — delegates to service layer (cache-aware + SETNX)
 func (app *App) redeemForStaff(c *gin.Context) {
 	staffPassID := c.Param("staff_pass_id")
 
-	// Check eligibility first
-	var teamName string
-	err := app.DB.QueryRow(`
-		SELECT team_name 
-		FROM staff_mappings 
-		WHERE staff_pass_id = $1 
-		ORDER BY created_at DESC 
-		LIMIT 1`, staffPassID).Scan(&teamName)
-
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":         "Invalid staff pass ID",
-			"staff_pass_id": staffPassID,
-		})
-		return
-	}
+	result, err := app.RedeemPresent(staffPassID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate staff pass"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Check if team has already redeemed
-	var redeemed bool
-	err = app.DB.QueryRow("SELECT redeemed FROM redemptions WHERE team_name = $1", teamName).Scan(&redeemed)
-	if err != nil && err != sql.ErrNoRows {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check team redemption status"})
-		return
-	}
-
-	if redeemed {
-		c.JSON(http.StatusConflict, gin.H{
-			"error":     "Team has already redeemed",
-			"team_name": teamName,
-		})
-		return
-	}
-
-	// Upsert redemption record, marking as redeemed
-	var r Redemption
-	err = app.DB.QueryRow(`
-		INSERT INTO redemptions (team_name, redeemed, redeemed_at)
-		VALUES ($1, TRUE, CURRENT_TIMESTAMP)
-		ON CONFLICT (team_name) DO UPDATE
-			SET redeemed = TRUE, redeemed_at = CURRENT_TIMESTAMP
-		RETURNING team_name, redeemed, redeemed_at`,
-		teamName).Scan(&r.TeamName, &r.Redeemed, &r.RedeemedAt)
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create redemption record"})
+	if !result.Success {
+		// Distinguish invalid staff from already-redeemed
+		if result.TeamName == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":         result.Message,
+				"staff_pass_id": staffPassID,
+			})
+		} else {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":     result.Message,
+				"team_name": result.TeamName,
+			})
+		}
 		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message":    "Redemption successful",
-		"redemption": r,
+		"redemption": result.Redemption,
 	})
 }
