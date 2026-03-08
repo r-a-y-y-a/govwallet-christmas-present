@@ -121,8 +121,8 @@ func (app *App) createRedemption(c *gin.Context) {
 
 	// Sync cache so the SETNX gate is aware of this redemption
 	if app.Cache != nil && r.Redeemed {
-		if _, cacheErr := app.Cache.SetRedemptionNX(c.Request.Context(), r.TeamName); cacheErr != nil {
-			log.Printf("cache: SetRedemptionNX error for %s: %v", r.TeamName, cacheErr)
+		if cacheErr := app.Cache.SetRedemptionStatus(c.Request.Context(), r.TeamName); cacheErr != nil {
+			log.Printf("cache: SetRedemptionStatus error for %s: %v", r.TeamName, cacheErr)
 		}
 	}
 
@@ -159,8 +159,8 @@ func (app *App) updateRedemption(c *gin.Context) {
 	// Sync cache: mark redeemed or clear so team can redeem again
 	if app.Cache != nil {
 		if r.Redeemed {
-			if _, cacheErr := app.Cache.SetRedemptionNX(c.Request.Context(), teamName); cacheErr != nil {
-				log.Printf("cache: SetRedemptionNX error for %s: %v", teamName, cacheErr)
+			if cacheErr := app.Cache.SetRedemptionStatus(c.Request.Context(), teamName); cacheErr != nil {
+				log.Printf("cache: SetRedemptionStatus error for %s: %v", teamName, cacheErr)
 			}
 		} else {
 			if cacheErr := app.Cache.InvalidateRedemption(c.Request.Context(), teamName); cacheErr != nil {

@@ -60,8 +60,8 @@ func (app *App) resolveTeamName(ctx context.Context, staffPassID string) (string
 }
 
 // RedeemPresent attempts to redeem a present for a given staff pass ID.
-// It uses SETNX via cache as an atomic concurrency gate so that only
-// one desk can win the redemption for a given team.
+// It writes to PostgreSQL first (source of truth + concurrency gate),
+// then updates the Redis cache on success.
 func (app *App) RedeemPresent(staffPassID string) (*RedeemResult, error) {
 	ctx := context.Background()
 
@@ -77,31 +77,13 @@ func (app *App) RedeemPresent(staffPassID string) (*RedeemResult, error) {
 		return nil, fmt.Errorf("failed to validate staff pass: %w", err)
 	}
 
-	// ── Step 2: SETNX concurrency gate ─────────────────────────────────
-	// If cache is available, use atomic SetRedemptionNX to serialize
-	// concurrent desks. Only the first caller gets set=true.
+	// ── Step 2: cache fast-reject (performance optimisation) ───────────
+	// If Redis already shows this team as redeemed, skip the DB round-trip.
 	if app.Cache != nil {
-		set, cacheErr := app.Cache.SetRedemptionNX(ctx, teamName)
+		redeemed, found, cacheErr := app.Cache.GetRedemptionStatus(ctx, teamName)
 		if cacheErr != nil {
-			log.Printf("cache: SetRedemptionNX error (falling back to DB): %v", cacheErr)
-			// Fall through to DB-only path below
-		} else if !set {
-			// Another desk already locked this team — fast reject.
-			return &RedeemResult{
-				Success:  false,
-				TeamName: teamName,
-				Message:  fmt.Sprintf("Team '%s' has already redeemed their present", teamName),
-			}, nil
-		}
-		// set == true → this desk won the lock, proceed.
-	} else {
-		// No cache: fall back to DB check
-		var redeemed bool
-		err = app.DB.QueryRow("SELECT redeemed FROM redemptions WHERE team_name = $1", teamName).Scan(&redeemed)
-		if err != nil && err != sql.ErrNoRows {
-			return nil, fmt.Errorf("failed to check team redemption status: %w", err)
-		}
-		if redeemed {
+			log.Printf("cache: GetRedemptionStatus error (falling back to DB): %v", cacheErr)
+		} else if found && redeemed {
 			return &RedeemResult{
 				Success:  false,
 				TeamName: teamName,
@@ -110,24 +92,43 @@ func (app *App) RedeemPresent(staffPassID string) (*RedeemResult, error) {
 		}
 	}
 
-	// ── Step 3: write to PostgreSQL (source of truth) ──────────────────
+	// ── Step 3: DB write (source of truth + concurrency gate) ──────────
+	// The WHERE clause ensures the UPDATE only fires when the existing
+	// row has redeemed=FALSE. If the team is already redeemed, no row
+	// is returned and we get sql.ErrNoRows — this is the DB-level
+	// concurrency gate that serialises concurrent desk requests.
 	var r Redemption
 	err = app.DB.QueryRow(`
 		INSERT INTO redemptions (team_name, redeemed, redeemed_at)
 		VALUES ($1, TRUE, CURRENT_TIMESTAMP)
 		ON CONFLICT (team_name) DO UPDATE
 			SET redeemed = TRUE, redeemed_at = CURRENT_TIMESTAMP
+			WHERE redemptions.redeemed = FALSE
 		RETURNING team_name, redeemed, redeemed_at`,
 		teamName).Scan(&r.TeamName, &r.Redeemed, &r.RedeemedAt)
 
-	if err != nil {
-		// ── Step 4: rollback cache on DB failure ────────────────────
+	if err == sql.ErrNoRows {
+		// Team already redeemed — populate cache for future fast rejects
 		if app.Cache != nil {
-			if invErr := app.Cache.InvalidateRedemption(ctx, teamName); invErr != nil {
-				log.Printf("cache: InvalidateRedemption rollback error: %v", invErr)
+			if cacheErr := app.Cache.SetRedemptionStatus(ctx, teamName); cacheErr != nil {
+				log.Printf("cache: SetRedemptionStatus error: %v", cacheErr)
 			}
 		}
+		return &RedeemResult{
+			Success:  false,
+			TeamName: teamName,
+			Message:  fmt.Sprintf("Team '%s' has already redeemed their present", teamName),
+		}, nil
+	}
+	if err != nil {
 		return nil, fmt.Errorf("failed to create redemption record: %w", err)
+	}
+
+	// ── Step 4: DB succeeded — update Redis cache ──────────────────────
+	if app.Cache != nil {
+		if cacheErr := app.Cache.SetRedemptionStatus(ctx, teamName); cacheErr != nil {
+			log.Printf("cache: SetRedemptionStatus error: %v", cacheErr)
+		}
 	}
 
 	return &RedeemResult{

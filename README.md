@@ -1,6 +1,6 @@
 # GovTech Christmas Redemption System
 
-A Go-based API for managing Christmas gift redemptions across multiple teams. Uses PostgreSQL as the source of truth and Redis as a fast cache layer with atomic SETNX-based concurrency control for multi-desk environments.
+A Go-based API for managing Christmas gift redemptions across multiple teams. Uses PostgreSQL as the source of truth and concurrency gate, with Redis as a read-through cache layer for multi-desk environments.
 
 ## Assessment Disclaimer
 
@@ -30,7 +30,7 @@ govtech-christmas/
 │   ├── service.go             # Business logic (RedeemPresent, CheckEligibility)
 │   └── cache/
 │       ├── store.go           # CacheStore interface
-│       └── redis.go           # Redis implementation (SETNX, TTL)
+│       └── redis.go           # Redis implementation (SET, TTL)
 ├── data/
 │   └── staff_mappings.csv     # Staff-to-team mappings (loaded on startup)
 ├── docker-compose.yml         # PostgreSQL + Redis + App services
@@ -46,7 +46,7 @@ govtech-christmas/
 
 1. **Startup**: PostgreSQL tables created via `init.sql` → CSV staff mappings loaded into DB → Redis cache pre-warmed with all staff-to-team mappings
 2. **Eligibility check**: Cache-aside lookup (Redis hit → return, miss → DB query → populate cache)
-3. **Redemption**: Staff lookup (cache-aside) → `SETNX` atomic gate in Redis (only first desk wins) → write to PostgreSQL → on DB failure, rollback cache via `InvalidateRedemption`
+3. **Redemption**: Staff lookup (cache-aside) → cache fast-reject (skip DB if already redeemed) → DB conditional upsert (concurrency gate, only first desk wins) → update Redis cache on success
 4. **Reversal**: `DELETE /api/v1/redemptions/:team_name` removes from DB then invalidates Redis cache
 
 ### Redis Cache Strategy
@@ -54,10 +54,10 @@ govtech-christmas/
 | Concern | Approach |
 |---------|----------|
 | Staff lookups | Cache-aside with 1h TTL (static data, pre-warmed on startup) |
-| Redemption status | SETNX atomic gate with 24h TTL |
-| Concurrent desks | Redis `SETNX` — single-threaded, exactly one desk wins |
-| Write order | PostgreSQL first (durability), then Redis (performance) |
-| DB write failure | Redis key rolled back via `InvalidateRedemption` |
+| Redemption status | Cache-aside read with 24h TTL; updated after DB write |
+| Concurrent desks | PostgreSQL conditional upsert — serialised at row level, exactly one desk wins |
+| Write order | PostgreSQL first (source of truth), then Redis (read cache) |
+| DB write failure | No cache rollback needed — Redis is only written after DB success |
 | Ops reversal | DELETE endpoint invalidates cache immediately |
 | CRUD consistency | Create/update/delete endpoints sync Redis to match DB state |
 | Redis down | System degrades gracefully to DB-only reads; `/health` reports `"degraded"` |
@@ -207,7 +207,7 @@ go test -v -count=1 -tags=integration ./...
 | Package | Tests | What's tested |
 |---------|-------|---------------|
 | `main` (root) | 8 | CSV parsing (valid/header-only/empty/invalid-timestamp/bad-columns/mixed), env var fallback |
-| `integration` | 36 | Real PostgreSQL + Redis via Docker: health check, staff mappings CRUD, lookup, cache prewarm, eligibility, full redemption round-trip, CRUD, 20-goroutine concurrent SETNX, cache-aside population, CSV file loading (valid/missing/empty), route registration, service-level RedeemPresent (success/invalid/already-redeemed), service-level CheckEligibility (eligible/invalid/already-redeemed), invalid JSON handling, update/delete not-found, delete cache invalidation, write-through cache, redemptions list, CRUD cache consistency (create-syncs-cache, update-syncs-cache), Redis CacheStore behavioral tests (miss/hit, key isolation, SETNX win/lose, invalidate + re-NX, noop invalidation, ping, 50-goroutine concurrent NX, concurrent writes) |
+| `integration` | 36 | Real PostgreSQL + Redis via Docker: health check, staff mappings CRUD, lookup, cache prewarm, eligibility, full redemption round-trip, CRUD, 20-goroutine concurrent redemption, cache-aside population, CSV file loading (valid/missing/empty), route registration, service-level RedeemPresent (success/invalid/already-redeemed), service-level CheckEligibility (eligible/invalid/already-redeemed), invalid JSON handling, update/delete not-found, delete cache invalidation, write-through cache, redemptions list, CRUD cache consistency (create-syncs-cache, update-syncs-cache), Redis CacheStore behavioral tests (miss/hit/idempotent-set, key isolation, invalidate + re-set, noop invalidation, ping, 50-goroutine concurrent set, concurrent writes) |
 
 ## Environment Variables
 

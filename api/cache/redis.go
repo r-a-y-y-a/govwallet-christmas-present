@@ -62,15 +62,9 @@ func (r *RedisCache) GetRedemptionStatus(ctx context.Context, teamName string) (
 	return val == "true", true, nil
 }
 
-func (r *RedisCache) SetRedemptionNX(ctx context.Context, teamName string) (bool, error) {
+func (r *RedisCache) SetRedemptionStatus(ctx context.Context, teamName string) error {
 	key := redemptionKeyPrefix + teamName
-	// SetNX returns true if the key was set (did not exist), false if it already existed.
-	// This is atomic — Redis is single-threaded, so concurrent calls are serialized.
-	set, err := r.client.SetNX(ctx, key, "true", redemptionTTL).Result()
-	if err != nil {
-		return false, fmt.Errorf("redis SETNX %s: %w", key, err)
-	}
-	return set, nil
+	return r.client.Set(ctx, key, "true", redemptionTTL).Err()
 }
 
 func (r *RedisCache) InvalidateRedemption(ctx context.Context, teamName string) error {

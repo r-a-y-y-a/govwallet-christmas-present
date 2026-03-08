@@ -1037,32 +1037,30 @@ func TestIntegration_RedisCache_KeyIsolation(t *testing.T) {
 	}
 }
 
-func TestIntegration_RedisCache_RedemptionNX_WinAndLose(t *testing.T) {
+func TestIntegration_RedisCache_RedemptionStatus_SetAndGet(t *testing.T) {
 	app := integrationSetup(t)
 	ctx := context.Background()
 
 	// Miss
-	redeemed, found, err := app.Cache.GetRedemptionStatus(ctx, "NXTeam")
+	redeemed, found, err := app.Cache.GetRedemptionStatus(ctx, "StatusTeam")
 	if err != nil || found || redeemed {
 		t.Errorf("expected miss, got found=%v redeemed=%v err=%v", found, redeemed, err)
 	}
 
-	// First SETNX wins
-	set, err := app.Cache.SetRedemptionNX(ctx, "NXTeam")
-	if err != nil || !set {
-		t.Fatalf("expected SETNX win, got set=%v err=%v", set, err)
+	// Set
+	if err := app.Cache.SetRedemptionStatus(ctx, "StatusTeam"); err != nil {
+		t.Fatalf("SetRedemptionStatus error: %v", err)
 	}
 
 	// Now cached as redeemed
-	redeemed, found, err = app.Cache.GetRedemptionStatus(ctx, "NXTeam")
+	redeemed, found, err = app.Cache.GetRedemptionStatus(ctx, "StatusTeam")
 	if err != nil || !found || !redeemed {
 		t.Errorf("expected hit redeemed=true, got found=%v redeemed=%v err=%v", found, redeemed, err)
 	}
 
-	// Second SETNX loses
-	set, err = app.Cache.SetRedemptionNX(ctx, "NXTeam")
-	if err != nil || set {
-		t.Errorf("expected SETNX lose, got set=%v err=%v", set, err)
+	// Idempotent: setting again succeeds without error
+	if err := app.Cache.SetRedemptionStatus(ctx, "StatusTeam"); err != nil {
+		t.Errorf("expected idempotent set to succeed, got err=%v", err)
 	}
 }
 
@@ -1070,7 +1068,7 @@ func TestIntegration_RedisCache_InvalidateRedemption(t *testing.T) {
 	app := integrationSetup(t)
 	ctx := context.Background()
 
-	_, _ = app.Cache.SetRedemptionNX(ctx, "InvTeam")
+	_ = app.Cache.SetRedemptionStatus(ctx, "InvTeam")
 
 	if err := app.Cache.InvalidateRedemption(ctx, "InvTeam"); err != nil {
 		t.Fatalf("InvalidateRedemption error: %v", err)
@@ -1082,10 +1080,9 @@ func TestIntegration_RedisCache_InvalidateRedemption(t *testing.T) {
 		t.Errorf("expected miss after invalidation, got found=%v err=%v", found, err)
 	}
 
-	// Re-NX should succeed
-	set, err := app.Cache.SetRedemptionNX(ctx, "InvTeam")
-	if err != nil || !set {
-		t.Errorf("expected SETNX win after invalidation, got set=%v err=%v", set, err)
+	// Re-set should succeed
+	if err := app.Cache.SetRedemptionStatus(ctx, "InvTeam"); err != nil {
+		t.Errorf("expected set after invalidation to succeed, got err=%v", err)
 	}
 }
 
@@ -1105,35 +1102,37 @@ func TestIntegration_RedisCache_Ping(t *testing.T) {
 	}
 }
 
-func TestIntegration_RedisCache_ConcurrentNX(t *testing.T) {
+func TestIntegration_RedisCache_ConcurrentSet(t *testing.T) {
 	app := integrationSetup(t)
 	ctx := context.Background()
 
 	const goroutines = 50
 	var wg sync.WaitGroup
+	var errs int
 	var mu sync.Mutex
-	winners := 0
 
 	wg.Add(goroutines)
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			set, err := app.Cache.SetRedemptionNX(ctx, "ConcurrentTeam")
-			if err != nil {
-				t.Errorf("SetRedemptionNX error: %v", err)
-				return
-			}
-			if set {
+			if err := app.Cache.SetRedemptionStatus(ctx, "ConcurrentTeam"); err != nil {
 				mu.Lock()
-				winners++
+				errs++
 				mu.Unlock()
+				t.Errorf("SetRedemptionStatus error: %v", err)
 			}
 		}()
 	}
 	wg.Wait()
 
-	if winners != 1 {
-		t.Errorf("expected exactly 1 SETNX winner across %d goroutines, got %d", goroutines, winners)
+	if errs != 0 {
+		t.Errorf("expected 0 errors across %d goroutines, got %d", goroutines, errs)
+	}
+
+	// Verify final state is redeemed
+	redeemed, found, err := app.Cache.GetRedemptionStatus(ctx, "ConcurrentTeam")
+	if err != nil || !found || !redeemed {
+		t.Errorf("expected redeemed after concurrent writes, got found=%v redeemed=%v err=%v", found, redeemed, err)
 	}
 }
 

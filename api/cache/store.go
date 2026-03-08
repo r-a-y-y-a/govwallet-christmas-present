@@ -18,11 +18,9 @@ type CacheStore interface {
 	// This distinguishes "not cached" from "cached as false".
 	GetRedemptionStatus(ctx context.Context, teamName string) (redeemed bool, found bool, err error)
 
-	// SetRedemptionNX atomically sets the redemption status for a team
-	// ONLY if it does not already exist (SETNX). Returns set=true if
-	// this caller won the lock, set=false if another desk already set it.
-	// This is the concurrency gate for multi-desk redemption.
-	SetRedemptionNX(ctx context.Context, teamName string) (set bool, err error)
+	// SetRedemptionStatus unconditionally marks a team as redeemed in cache.
+	// Used to populate the cache after a successful DB write.
+	SetRedemptionStatus(ctx context.Context, teamName string) error
 
 	// InvalidateRedemption removes the redemption status from cache.
 	// Used when a redemption is reversed via the API or ops intervention.
