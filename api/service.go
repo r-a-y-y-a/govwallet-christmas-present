@@ -100,9 +100,9 @@ func (app *App) RedeemPresent(staffPassID string) (*RedeemResult, error) {
 	var r Redemption
 	err = app.DB.QueryRow(`
 		INSERT INTO redemptions (team_name, redeemed, redeemed_at)
-		VALUES ($1, TRUE, CURRENT_TIMESTAMP)
+		VALUES ($1, TRUE, (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT)
 		ON CONFLICT (team_name) DO UPDATE
-			SET redeemed = TRUE, redeemed_at = CURRENT_TIMESTAMP
+			SET redeemed = TRUE, redeemed_at = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
 			WHERE redemptions.redeemed = FALSE
 		RETURNING team_name, redeemed, redeemed_at`,
 		teamName).Scan(&r.TeamName, &r.Redeemed, &r.RedeemedAt)

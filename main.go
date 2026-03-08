@@ -129,7 +129,7 @@ func createTables(db *sql.DB) error {
 	CREATE TABLE IF NOT EXISTS redemptions (
 		team_name VARCHAR(255) UNIQUE NOT NULL,
 		redeemed BOOLEAN NOT NULL DEFAULT FALSE,
-		redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		redeemed_at BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT -- epoch milliseconds
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_staff_mappings_staff_pass_id ON staff_mappings(staff_pass_id);

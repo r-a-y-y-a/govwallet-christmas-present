@@ -141,7 +141,7 @@ func (app *App) updateRedemption(c *gin.Context) {
 	result, err := app.DB.Exec(`
 		UPDATE redemptions
 		SET redeemed = $1,
-		    redeemed_at = CASE WHEN $1 THEN CURRENT_TIMESTAMP ELSE redeemed_at END
+		    redeemed_at = CASE WHEN $1 THEN (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT ELSE redeemed_at END
 		WHERE team_name = $2`,
 		r.Redeemed, teamName)
 

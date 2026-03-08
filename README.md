@@ -153,7 +153,7 @@ POST /api/v1/redeem/:staff_pass_id
   "redemption": {
     "team_name": "Team Alpha",
     "redeemed": true,
-    "redeemed_at": "2026-03-07T14:30:45Z"
+    "redeemed_at": 1709820645000
   }
 }
 ```

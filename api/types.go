@@ -2,7 +2,6 @@ package api
 
 import (
 	"database/sql"
-	"time"
 
 	"github.com/hanju/govtech-christmas/api/cache"
 )
@@ -21,7 +20,7 @@ type StaffMapping struct {
 }
 
 type Redemption struct {
-	TeamName   string    `json:"team_name"`
-	Redeemed   bool      `json:"redeemed"`
-	RedeemedAt time.Time `json:"redeemed_at"`
+	TeamName   string `json:"team_name"`
+	Redeemed   bool   `json:"redeemed"`
+	RedeemedAt int64  `json:"redeemed_at"`
 }
